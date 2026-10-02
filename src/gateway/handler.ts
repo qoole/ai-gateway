@@ -6534,6 +6534,13 @@ function parseModelReference(
     };
   }
 
+  if (providerConfigs.some((candidate) => candidate.models.includes(raw))) {
+    return {
+      raw,
+      model: raw
+    };
+  }
+
   if (options.googleAsLiteral === true && providerHint.toLowerCase() === 'google') {
     return {
       raw,

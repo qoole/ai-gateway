@@ -6586,6 +6586,173 @@ describe('gateway routes protocol conversion', () => {
     }
   });
 
+  it.each([
+    ['openai', 'openai/gpt-oss-120b'],
+    ['anthropic', 'anthropic/claude-opus-4'],
+    ['claude', 'claude/claude-opus-4'],
+    ['gemini', 'gemini/gemini-2.5-pro']
+  ])(
+    'resolves the reserved "%s" namespace when the full selector is a configured model id',
+    async (namespace, model) => {
+      const fetchMock = vi.fn(async () => {
+        return new Response(
+          JSON.stringify({
+            id: 'chatcmpl_reserved_namespace_1',
+            model,
+            choices: [
+              {
+                index: 0,
+                finish_reason: 'stop',
+                message: { role: 'assistant', content: 'namespace-ok' }
+              }
+            ]
+          }),
+          {
+            status: 200,
+            headers: {
+              'content-type': 'application/json'
+            }
+          }
+        );
+      });
+      vi.stubGlobal('fetch', fetchMock as typeof fetch);
+
+      const app = Fastify({ logger: false });
+      registerGatewayRoutes(
+        app,
+        createConfig([createProviderConfig('openrouter-main', 'openai_chat_completions', [model])]),
+        createGatewayRuntime()
+      );
+      await app.ready();
+
+      try {
+        const response = await app.inject({
+          method: 'POST',
+          url: '/v1/chat/completions',
+          headers: {
+            'content-type': 'application/json',
+            'x-target-provider': 'openrouter-main'
+          },
+          payload: {
+            model,
+            messages: [{ role: 'user', content: 'hello' }],
+            stream: false
+          }
+        });
+
+        expect(response.statusCode).toBe(200);
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+        const upstreamBody = JSON.parse(String((fetchMock.mock.calls[0]?.[1] as RequestInit)?.body));
+        expect(upstreamBody.model).toBe(model);
+      } finally {
+        await app.close();
+      }
+
+      expect(namespace).toBeTruthy();
+    }
+  );
+
+  it('keeps configured provider-name precedence over the reserved alias table', async () => {
+    const fetchMock = vi.fn(async () => {
+      return new Response(
+        JSON.stringify({
+          id: 'chatcmpl_provider_name_wins_1',
+          model: 'gpt-oss-20b',
+          choices: [
+            {
+              index: 0,
+              finish_reason: 'stop',
+              message: { role: 'assistant', content: 'provider-name-ok' }
+            }
+          ]
+        }),
+        {
+          status: 200,
+          headers: {
+            'content-type': 'application/json'
+          }
+        }
+      );
+    });
+    vi.stubGlobal('fetch', fetchMock as typeof fetch);
+
+    const app = Fastify({ logger: false });
+    registerGatewayRoutes(
+      app,
+      createConfig([createProviderConfig('openai', 'openai_chat_completions', ['gpt-oss-20b'])]),
+      createGatewayRuntime()
+    );
+    await app.ready();
+
+    try {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/v1/chat/completions',
+        headers: {
+          'content-type': 'application/json',
+          'x-target-provider': 'openai'
+        },
+        payload: {
+          model: 'openai/gpt-oss-20b',
+          messages: [{ role: 'user', content: 'hello' }],
+          stream: false
+        }
+      });
+
+      expect(response.statusCode).toBe(200);
+      const upstreamBody = JSON.parse(String((fetchMock.mock.calls[0]?.[1] as RequestInit)?.body));
+      expect(upstreamBody.model).toBe('gpt-oss-20b');
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('still strips the reserved segment when the full selector is not a configured model id', async () => {
+    const fetchMock = vi.fn(async () => {
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: {
+          'content-type': 'application/json'
+        }
+      });
+    });
+    vi.stubGlobal('fetch', fetchMock as typeof fetch);
+
+    const app = Fastify({ logger: false });
+    registerGatewayRoutes(
+      app,
+      createConfig([createProviderConfig('openrouter-main', 'openai_chat_completions', ['openai/gpt-oss-120b'])]),
+      createGatewayRuntime()
+    );
+    await app.ready();
+
+    try {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/v1/chat/completions',
+        headers: {
+          'content-type': 'application/json',
+          'x-target-provider': 'openrouter-main'
+        },
+        payload: {
+          model: 'openai/gpt-oss-20b',
+          messages: [{ role: 'user', content: 'hello' }],
+          stream: false
+        }
+      });
+
+      expect(response.statusCode).toBe(400);
+      expect(fetchMock).not.toHaveBeenCalled();
+      const body = JSON.parse(response.body);
+      expect(body.error.attempts[0].stage).toBe('model_resolution');
+      expect(body.error.attempts[0].message).toContain(
+        'Model "gpt-oss-20b" is not configured for target provider openrouter-main.'
+      );
+    } finally {
+      await app.close();
+    }
+  });
+
   it('accepts public provider model selectors for protocol-qualified provider names', async () => {
     const fetchMock = vi.fn(async () => {
       return new Response(
