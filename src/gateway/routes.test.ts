@@ -6753,6 +6753,70 @@ describe('gateway routes protocol conversion', () => {
     }
   });
 
+  it('resolves a provider-namespaced id whose prefix names the provider itself', async () => {
+    const fetchMock = vi.fn(async () => {
+      return new Response(
+        JSON.stringify({
+          id: 'chatcmpl_provider_namespaced_1',
+          model: 'openrouter/auto',
+          choices: [
+            {
+              index: 0,
+              finish_reason: 'stop',
+              message: { role: 'assistant', content: 'auto-ok' }
+            }
+          ]
+        }),
+        {
+          status: 200,
+          headers: {
+            'content-type': 'application/json'
+          }
+        }
+      );
+    });
+    vi.stubGlobal('fetch', fetchMock as typeof fetch);
+
+    const app = Fastify({ logger: false });
+    registerGatewayRoutes(
+      app,
+      createConfig([
+        createProviderConfig('openrouter-main', 'openai_chat_completions', [
+          'openrouter/auto',
+          'openai/gpt-oss-120b'
+        ])
+      ]),
+      createGatewayRuntime()
+    );
+    await app.ready();
+
+    try {
+      // The selector's first segment names the provider, so the provider-name
+      // branch would consume `openrouter/` and leave the unconfigured remainder
+      // `auto`. The exact-configured-id check must run before that return.
+      const response = await app.inject({
+        method: 'POST',
+        url: '/v1/chat/completions',
+        headers: {
+          'content-type': 'application/json',
+          'x-target-provider': 'openrouter-main'
+        },
+        payload: {
+          model: 'openrouter/auto',
+          messages: [{ role: 'user', content: 'hello' }],
+          stream: false
+        }
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const upstreamBody = JSON.parse(String((fetchMock.mock.calls[0]?.[1] as RequestInit)?.body));
+      expect(upstreamBody.model).toBe('openrouter/auto');
+    } finally {
+      await app.close();
+    }
+  });
+
   it('accepts public provider model selectors for protocol-qualified provider names', async () => {
     const fetchMock = vi.fn(async () => {
       return new Response(

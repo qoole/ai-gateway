@@ -6525,19 +6525,25 @@ function parseModelReference(
   }
 
   const providerConfig = findProviderConfigBySelectorAlias(providerConfigs, providerHint);
+
+  // An exact configured model id wins over both interpretations of the leading
+  // segment. The provider-name branch below consumes `model` as the remainder, so
+  // a selector like `openrouter/auto` -- whose prefix names a provider and whose
+  // remainder is not itself configured -- would otherwise be stripped to `auto`
+  // and rejected, even though the full id is in the provider's model list.
+  if (providerConfigs.some((candidate) => candidate.models.includes(raw))) {
+    return {
+      raw,
+      model: raw
+    };
+  }
+
   if (providerConfig) {
     return {
       raw,
       model,
       provider: providerFromProviderType(providerConfig.type),
       providerConfig
-    };
-  }
-
-  if (providerConfigs.some((candidate) => candidate.models.includes(raw))) {
-    return {
-      raw,
-      model: raw
     };
   }
 
