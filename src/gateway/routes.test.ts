@@ -6594,7 +6594,7 @@ describe('gateway routes protocol conversion', () => {
   ])(
     'resolves the reserved "%s" namespace when the full selector is a configured model id',
     async (namespace, model) => {
-      const fetchMock = vi.fn(async () => {
+      const fetchMock = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
         return new Response(
           JSON.stringify({
             id: 'chatcmpl_reserved_namespace_1',
@@ -6653,7 +6653,7 @@ describe('gateway routes protocol conversion', () => {
   );
 
   it('keeps configured provider-name precedence over the reserved alias table', async () => {
-    const fetchMock = vi.fn(async () => {
+    const fetchMock = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
       return new Response(
         JSON.stringify({
           id: 'chatcmpl_provider_name_wins_1',
@@ -6754,7 +6754,7 @@ describe('gateway routes protocol conversion', () => {
   });
 
   it('resolves a provider-namespaced id whose prefix names the provider itself', async () => {
-    const fetchMock = vi.fn(async () => {
+    const fetchMock = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
       return new Response(
         JSON.stringify({
           id: 'chatcmpl_provider_namespaced_1',
@@ -6812,6 +6812,73 @@ describe('gateway routes protocol conversion', () => {
       expect(fetchMock).toHaveBeenCalledTimes(1);
       const upstreamBody = JSON.parse(String((fetchMock.mock.calls[0]?.[1] as RequestInit)?.body));
       expect(upstreamBody.model).toBe('openrouter/auto');
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('keeps the named-provider route when an unrelated provider lists the same full id', async () => {
+    const fetchMock = vi.fn(
+      async (url: string | URL | Request, init?: RequestInit) => {
+        return new Response(
+          JSON.stringify({
+            id: 'chatcmpl_named_route_kept_1',
+            model: 'gpt-oss-20b',
+            choices: [
+              {
+                index: 0,
+                finish_reason: 'stop',
+                message: { role: 'assistant', content: 'named-route-ok' }
+              }
+            ]
+          }),
+          {
+            status: 200,
+            headers: {
+              'content-type': 'application/json'
+            }
+          }
+        );
+      }
+    );
+    vi.stubGlobal('fetch', fetchMock as typeof fetch);
+
+    const namedOpenai = {
+      ...createProviderConfig('openai', 'openai_chat_completions', ['gpt-oss-20b']),
+      baseurl: 'https://direct.test/v1'
+    };
+    const unrelated = createProviderConfig('unrelated', 'openai_chat_completions', [
+      'openai/gpt-oss-20b'
+    ]);
+
+    const app = Fastify({ logger: false });
+    registerGatewayRoutes(app, createConfig([namedOpenai, unrelated]), createGatewayRuntime());
+    await app.ready();
+
+    try {
+      // No x-target-provider header: the selector's prefix names the `openai`
+      // provider, so that route (and its baseurl/credentials) must survive even
+      // though an unrelated provider lists the identical full id.
+      const response = await app.inject({
+        method: 'POST',
+        url: '/v1/chat/completions',
+        headers: {
+          'content-type': 'application/json'
+        },
+        payload: {
+          model: 'openai/gpt-oss-20b',
+          messages: [{ role: 'user', content: 'hello' }],
+          stream: false
+        }
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const calledUrl = String(fetchMock.mock.calls[0]?.[0]);
+      expect(calledUrl).toContain('https://direct.test/v1');
+      const calledInit = fetchMock.mock.calls[0]?.[1] as RequestInit | undefined;
+      const upstreamBody = JSON.parse(String(calledInit?.body));
+      expect(upstreamBody.model).toBe('gpt-oss-20b');
     } finally {
       await app.close();
     }

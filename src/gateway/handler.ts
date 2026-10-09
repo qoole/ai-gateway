@@ -6525,25 +6525,36 @@ function parseModelReference(
   }
 
   const providerConfig = findProviderConfigBySelectorAlias(providerConfigs, providerHint);
+  if (providerConfig) {
+    // The hint names this provider. Its remainder stays the model when this
+    // provider offers it; when it instead offers the full selector verbatim (a
+    // provider-namespaced id such as openrouter/auto), keep the route and send
+    // the full id.
+    if (providerConfig.models.includes(model)) {
+      return {
+        raw,
+        model,
+        provider: providerFromProviderType(providerConfig.type),
+        providerConfig
+      };
+    }
 
-  // An exact configured model id wins over both interpretations of the leading
-  // segment. The provider-name branch below consumes `model` as the remainder, so
-  // a selector like `openrouter/auto` -- whose prefix names a provider and whose
-  // remainder is not itself configured -- would otherwise be stripped to `auto`
-  // and rejected, even though the full id is in the provider's model list.
-  if (providerConfigs.some((candidate) => candidate.models.includes(raw))) {
+    if (providerConfig.models.includes(raw)) {
+      return {
+        raw,
+        model: raw,
+        provider: providerFromProviderType(providerConfig.type),
+        providerConfig
+      };
+    }
+  } else if (providerConfigs.some((candidate) => candidate.models.includes(raw))) {
+    // No provider is named by the hint, so a verbatim-configured id still beats
+    // the reserved-alias strip below (openai/gpt-oss-120b against a provider
+    // named "OpenRouter"). An unrelated provider's list never overrides a
+    // named-provider route.
     return {
       raw,
       model: raw
-    };
-  }
-
-  if (providerConfig) {
-    return {
-      raw,
-      model,
-      provider: providerFromProviderType(providerConfig.type),
-      providerConfig
     };
   }
 
