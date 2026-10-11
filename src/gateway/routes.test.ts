@@ -6997,6 +6997,155 @@ describe('gateway routes protocol conversion', () => {
     }
   });
 
+  it('keeps the named-provider route when another provider lists the full selector (cross-provider collision)', async () => {
+    // private.models=[bar], other.models=[private/foo], body=private/foo. The named
+    // route must still win and the unsupported remainder must 400 at private,
+    // not silently fall through to `other`.
+    const fetchMock = vi.fn(async () => {
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      });
+    });
+    vi.stubGlobal('fetch', fetchMock as typeof fetch);
+
+    const namedPrivate = {
+      ...createProviderConfig('private', 'openai_chat_completions', ['bar']),
+      baseurl: 'https://private.test/v1'
+    };
+    const other = {
+      ...createProviderConfig('other', 'openai_chat_completions', ['private/foo']),
+      baseurl: 'https://other.test/v1'
+    };
+
+    const app = Fastify({ logger: false });
+    registerGatewayRoutes(app, createConfig([namedPrivate, other]), createGatewayRuntime());
+    await app.ready();
+
+    try {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/v1/chat/completions',
+        headers: {
+          'content-type': 'application/json'
+        },
+        payload: {
+          model: 'private/foo',
+          messages: [{ role: 'user', content: 'hello' }],
+          stream: false
+        }
+      });
+
+      expect(response.statusCode).toBe(400);
+      expect(fetchMock).not.toHaveBeenCalled();
+      const body = JSON.parse(response.body);
+      expect(body.error.attempts[0].stage).toBe('model_resolution');
+      expect(body.error.attempts[0].message).toContain(
+        'Model "foo" is not configured for target provider private.'
+      );
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('keeps the reserved-alias openai provider route and 400s when its remainder is unsupported', async () => {
+    // body = openai/gpt-4, openai.models = ['gpt-4-32k']. The reserved 'openai'
+    // alias names the openai providerConfig; the bare remainder 'gpt-4' is not
+    // in its allowlist — must 400 before any upstream is called.
+    const fetchMock = vi.fn(async () => {
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      });
+    });
+    vi.stubGlobal('fetch', fetchMock as typeof fetch);
+
+    const openaiConfig = {
+      ...createProviderConfig('openai', 'openai_chat_completions', ['gpt-4-32k']),
+      baseurl: 'https://openai.test/v1'
+    };
+
+    const app = Fastify({ logger: false });
+    registerGatewayRoutes(app, createConfig([openaiConfig]), createGatewayRuntime());
+    await app.ready();
+
+    try {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/v1/chat/completions',
+        headers: {
+          'content-type': 'application/json'
+        },
+        payload: {
+          model: 'openai/gpt-4',
+          messages: [{ role: 'user', content: 'hello' }],
+          stream: false
+        }
+      });
+
+      expect(response.statusCode).toBe(400);
+      expect(fetchMock).not.toHaveBeenCalled();
+      const body = JSON.parse(response.body);
+      expect(body.error.attempts[0].stage).toBe('model_resolution');
+      expect(body.error.attempts[0].message).toContain(
+        'Model "gpt-4" is not configured for target provider openai.'
+      );
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('with no header, a body whose prefix is a reserved alias names the matching provider when allowed', async () => {
+    // body = openai/gpt-4 with openai.models = ['gpt-4-32k', 'gpt-4-32k-raw']. The
+    // hint 'openai' names the public openai provider; remainder is configurable,
+    // so the request must hit openai.baseurl with model = 'gpt-4'.
+    const fetchMock = vi.fn(
+      async (_url: string | URL | Request, init?: RequestInit) => {
+        return new Response(
+          JSON.stringify({
+            id: 'chatcmpl_openai_short_1',
+            model: 'gpt-4',
+            choices: [{ index: 0, finish_reason: 'stop', message: { role: 'assistant', content: 'ok' } }]
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } }
+        );
+      }
+    );
+    vi.stubGlobal('fetch', fetchMock as typeof fetch);
+
+    const openaiConfig = {
+      ...createProviderConfig('openai', 'openai_chat_completions', ['gpt-4']),
+      baseurl: 'https://openai.test/v1'
+    };
+
+    const app = Fastify({ logger: false });
+    registerGatewayRoutes(app, createConfig([openaiConfig]), createGatewayRuntime());
+    await app.ready();
+
+    try {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/v1/chat/completions',
+        headers: { 'content-type': 'application/json' },
+        payload: {
+          model: 'openai/gpt-4',
+          messages: [{ role: 'user', content: 'hello' }],
+          stream: false
+        }
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const calledUrl = String(fetchMock.mock.calls[0]?.[0]);
+      expect(calledUrl).toContain('https://openai.test/v1');
+      const calledInit = fetchMock.mock.calls[0]?.[1] as RequestInit | undefined;
+      const upstreamBody = JSON.parse(String(calledInit?.body));
+      expect(upstreamBody.model).toBe('gpt-4');
+    } finally {
+      await app.close();
+    }
+  });
+
   it('accepts public provider model selectors for protocol-qualified provider names', async () => {
     const fetchMock = vi.fn(async () => {
       return new Response(
