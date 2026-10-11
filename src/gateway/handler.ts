@@ -6526,27 +6526,22 @@ function parseModelReference(
 
   const providerConfig = findProviderConfigBySelectorAlias(providerConfigs, providerHint);
   if (providerConfig) {
-    // The hint names this provider. Its remainder stays the model when this
-    // provider offers it; when it instead offers the full selector verbatim (a
-    // provider-namespaced id such as openrouter/auto), keep the route and send
-    // the full id.
-    if (providerConfig.models.includes(model)) {
-      return {
-        raw,
-        model,
-        provider: providerFromProviderType(providerConfig.type),
-        providerConfig
-      };
-    }
-
-    if (providerConfig.models.includes(raw)) {
-      return {
-        raw,
-        model: raw,
-        provider: providerFromProviderType(providerConfig.type),
-        providerConfig
-      };
-    }
+    // The hint names this provider. The named route always wins; the only
+    // selector-vs-full question is what to send upstream.
+    //
+    //   - provider offers the full selector verbatim (e.g. openrouter/auto):
+    //     send the full id so upstream can match its own namespace.
+    //   - otherwise: send the remainder. validateModelForTarget decides
+    //     whether it is accepted, rejected (400), or unrestricted (empty
+    //     models list). Model-list validation must not erase provider
+    //     selection.
+    const sendRaw = providerConfig.models.includes(raw);
+    return {
+      raw,
+      model: sendRaw ? raw : model,
+      provider: providerFromProviderType(providerConfig.type),
+      providerConfig
+    };
   } else if (providerConfigs.some((candidate) => candidate.models.includes(raw))) {
     // No provider is named by the hint, so a verbatim-configured id still beats
     // the reserved-alias strip below (openai/gpt-oss-120b against a provider

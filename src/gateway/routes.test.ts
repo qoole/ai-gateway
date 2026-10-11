@@ -6884,6 +6884,119 @@ describe('gateway routes protocol conversion', () => {
     }
   });
 
+  it('keeps the named-provider route when its models list is empty (unrestricted)', async () => {
+    // A provider named by the selector's prefix with `models: []` is the
+    // unrestricted shape: validateModelForTarget skips model checks entirely.
+    // The named route must still win (baseurl + credentials) and the
+    // remainder must be sent upstream verbatim.
+    const fetchMock = vi.fn(
+      async (url: string | URL | Request, init?: RequestInit) => {
+        return new Response(
+          JSON.stringify({
+            id: 'chatcmpl_named_unrestricted_1',
+            model: 'new-model',
+            choices: [
+              {
+                index: 0,
+                finish_reason: 'stop',
+                message: { role: 'assistant', content: 'unrestricted-ok' }
+              }
+            ]
+          }),
+          {
+            status: 200,
+            headers: {
+              'content-type': 'application/json'
+            }
+          }
+        );
+      }
+    );
+    vi.stubGlobal('fetch', fetchMock as typeof fetch);
+
+    const namedPrivate = {
+      ...createProviderConfig('private', 'openai_chat_completions', []),
+      baseurl: 'https://own.test/v1'
+    };
+
+    const app = Fastify({ logger: false });
+    registerGatewayRoutes(app, createConfig([namedPrivate]), createGatewayRuntime());
+    await app.ready();
+
+    try {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/v1/chat/completions',
+        headers: {
+          'content-type': 'application/json'
+        },
+        payload: {
+          model: 'private/new-model',
+          messages: [{ role: 'user', content: 'hello' }],
+          stream: false
+        }
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const calledUrl = String(fetchMock.mock.calls[0]?.[0]);
+      expect(calledUrl).toContain('https://own.test/v1');
+      const calledInit = fetchMock.mock.calls[0]?.[1] as RequestInit | undefined;
+      const upstreamBody = JSON.parse(String(calledInit?.body));
+      expect(upstreamBody.model).toBe('new-model');
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('keeps the named-provider route and 400s when the remainder is not in its models list', async () => {
+    // An unsupported model on an explicitly named provider must NOT fall
+    // through to the default route. validateModelForTarget must reject it
+    // before any upstream is called, preserving the named provider's
+    // selection.
+    const fetchMock = vi.fn(async () => {
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      });
+    });
+    vi.stubGlobal('fetch', fetchMock as typeof fetch);
+
+    const namedPrivate = {
+      ...createProviderConfig('private', 'openai_chat_completions', ['supported']),
+      baseurl: 'https://own.test/v1'
+    };
+
+    const app = Fastify({ logger: false });
+    registerGatewayRoutes(app, createConfig([namedPrivate]), createGatewayRuntime());
+    await app.ready();
+
+    try {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/v1/chat/completions',
+        headers: {
+          'content-type': 'application/json'
+        },
+        payload: {
+          model: 'private/unknown',
+          messages: [{ role: 'user', content: 'hello' }],
+          stream: false
+        }
+      });
+
+      expect(response.statusCode).toBe(400);
+      expect(fetchMock).not.toHaveBeenCalled();
+      const body = JSON.parse(response.body);
+      expect(body.error.attempts[0].stage).toBe('model_resolution');
+      expect(body.error.attempts[0].message).toContain(
+        'Model "unknown" is not configured for target provider private.'
+      );
+    } finally {
+      await app.close();
+    }
+  });
+
   it('accepts public provider model selectors for protocol-qualified provider names', async () => {
     const fetchMock = vi.fn(async () => {
       return new Response(
